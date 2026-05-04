@@ -28,49 +28,78 @@ namespace Oxide.Patcher.Docs
 
             foreach (Manifest manifest in project.Manifests)
             {
-                foreach (Hook hook in manifest.Hooks)
+                // Doc-gen loads its OWN AssemblyDefinition per manifest, completely separate from the
+                // shared AssemblyLoader the UI uses. Patches applied here never reach the UI's instance,
+                // so opening hook/method tabs after generating docs cannot show double-patched code.
+                AssemblyDefinition docsAssembly = LoadDocsAssembly(project, manifest, out IAssemblyResolver docsResolver);
+                if (docsAssembly == null)
                 {
-                    if (hook.Flagged)
+                    continue;
+                }
+
+                try
+                {
+                    List<(Hook Hook, MethodDefinition MethodDef)> patched = new List<(Hook, MethodDefinition)>();
+
+                    // Pass 1: apply every hook's patch to the throwaway assembly. Doing this before any
+                    // decompilation means the cached snapshot built lazily on the first decompile in pass 2
+                    // already contains every hook's Interface.CallHook injection, so per-hook
+                    // CodeAfterInjection lookups all see their own (and others') patches.
+                    foreach (Hook hook in manifest.Hooks)
                     {
-                        Console.WriteLine($"Skipping flagged hook {hook.Name}");
-                        continue;
-                    }
-                    try
-                    {
-                        MethodDefinition methodDef = assemblyLoader.GetMethod(hook.AssemblyName, hook.TypeName, hook.Signature);
-                        if (methodDef == null)
+                        if (hook.Flagged)
                         {
-                            throw new Exception($"Failed to find method definition for hook {hook.Name}");
+                            Console.WriteLine($"Skipping flagged hook {hook.Name}");
+                            continue;
                         }
-
-                        ILWeaver weaver = new ILWeaver(methodDef.Body) { Module = methodDef.Module };
-
-                        hook.PreparePatch(methodDef, weaver);
-                        hook.ApplyPatch(methodDef, weaver);
-
-                        weaver.Apply(methodDef.Body);
-
-                        DocsHook docsHook = new DocsHook(hook, methodDef, project.TargetDirectory);
-                        hooks.Add(docsHook);
-
-                        methodDef.Body = null;
-                    }
-                    catch (NotSupportedException) { }
-                    catch (DecompilerException)
-                    {
-                        Console.WriteLine($"Failed to decompile method for hook {hook.Name}");
-                    }
-                    catch (Exception e)
-                    {
-                        if (PatcherForm.MainForm != null)
+                        try
                         {
-                            MessageBox.Show($"There was an error while generating docs data for '{hook.Name}'. ({e})", "Oxide Patcher", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            MethodDefinition methodDef = GetMethod(docsAssembly, hook.TypeName, hook.Signature);
+                            if (methodDef == null)
+                            {
+                                throw new Exception($"Failed to find method definition for hook {hook.Name}");
+                            }
+
+                            ILWeaver weaver = new ILWeaver(methodDef.Body) { Module = methodDef.Module };
+
+                            hook.PreparePatch(methodDef, weaver);
+                            hook.ApplyPatch(methodDef, weaver);
+
+                            weaver.Apply(methodDef.Body);
+
+                            patched.Add((hook, methodDef));
                         }
-                        else
+                        catch (Exception e)
                         {
-                            Console.WriteLine($"There was an error while generating docs data for '{hook.Name}'. ({e})");
+                            ReportHookError(hook, e);
                         }
                     }
+
+                    // Pass 2: build DocsHook entries. The first decompile per assembly serializes the
+                    // AssemblyDefinition (now containing all patches) into a PEFile cached in
+                    // InMemorySnapshotCache; every subsequent decompile reuses it.
+                    foreach ((Hook hook, MethodDefinition methodDef) in patched)
+                    {
+                        try
+                        {
+                            DocsHook docsHook = new DocsHook(hook, methodDef, project.TargetDirectory);
+                            hooks.Add(docsHook);
+                        }
+                        catch (NotSupportedException) { }
+                        catch (DecompilerException ex)
+                        {
+                            Console.WriteLine($"Failed to decompile method for hook {hook.Name}: {ex.Message}{(ex.InnerException != null ? " | " + ex.InnerException.Message : string.Empty)}");
+                        }
+                        catch (Exception e)
+                        {
+                            ReportHookError(hook, e);
+                        }
+                    }
+                }
+                finally
+                {
+                    Decompiler.ClearInMemorySnapshotCache();
+                    (docsResolver as IDisposable)?.Dispose();
                 }
             }
 
@@ -92,6 +121,38 @@ namespace Oxide.Patcher.Docs
                 {
                     PatcherForm.MainForm.SetDocsButtonEnabled(true);
                 });
+            }
+        }
+
+        private static AssemblyDefinition LoadDocsAssembly(Project project, Manifest manifest, out IAssemblyResolver resolver)
+        {
+            resolver = null;
+            string assemblyName = manifest.AssemblyName;
+            string path = Path.Combine(project.TargetDirectory,
+                $"{Path.GetFileNameWithoutExtension(assemblyName)}_Original{Path.GetExtension(assemblyName)}");
+            if (!File.Exists(path))
+            {
+                path = Path.Combine(project.TargetDirectory, assemblyName);
+                if (!File.Exists(path))
+                {
+                    Console.WriteLine($"Failed to find assembly {assemblyName} for doc generation");
+                    return null;
+                }
+            }
+
+            resolver = new PatcherAssemblyResolver(project.TargetDirectory);
+            return AssemblyDefinition.ReadAssembly(path, new ReaderParameters { AssemblyResolver = resolver });
+        }
+
+        private static void ReportHookError(Hook hook, Exception e)
+        {
+            if (PatcherForm.MainForm != null)
+            {
+                MessageBox.Show($"There was an error while generating docs data for '{hook.Name}'. ({e})", "Oxide Patcher", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            else
+            {
+                Console.WriteLine($"There was an error while generating docs data for '{hook.Name}'. ({e})");
             }
         }
 

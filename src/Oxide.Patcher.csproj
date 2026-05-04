@@ -216,11 +216,23 @@
   <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
   <Target Name="EmbedCopyLocalReferences" BeforeTargets="CoreCompile" DependsOnTargets="ResolveAssemblyReferences">
     <ItemGroup>
-      <_CoreCompileResourceInputs Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.dll'">
-        <LogicalName>Oxide.Patcher.Dependencies.%(ReferenceCopyLocalPaths.Filename).dll</LogicalName>
+      <_LocalDepDlls Include="Dependencies\*.dll" />
+    </ItemGroup>
+    <PropertyGroup>
+      <_LocalDepFileNamesJoined>;@(_LocalDepDlls->'%(Filename)', ';');</_LocalDepFileNamesJoined>
+    </PropertyGroup>
+    <ItemGroup>
+      <_LocalDepEmbed Include="@(_LocalDepDlls)">
+        <LogicalName>Oxide.Patcher.Dependencies.%(Filename).dll</LogicalName>
         <WithCulture>false</WithCulture>
         <Type>Non-Resx</Type>
-      </_CoreCompileResourceInputs>
+      </_LocalDepEmbed>
+      <_OtherEmbed Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Extension)' == '.dll' AND !$(_LocalDepFileNamesJoined.Contains(';%(ReferenceCopyLocalPaths.Filename);'))">
+        <LogicalName>Oxide.Patcher.Dependencies.%(Filename).dll</LogicalName>
+        <WithCulture>false</WithCulture>
+        <Type>Non-Resx</Type>
+      </_OtherEmbed>
+      <_CoreCompileResourceInputs Include="@(_LocalDepEmbed);@(_OtherEmbed)" />
     </ItemGroup>
   </Target>
   <Target Name="LocalDeploy" AfterTargets="AfterBuild" Condition="Exists('$(SolutionDir).deploy')">

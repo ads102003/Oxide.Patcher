@@ -16,6 +16,7 @@ using Mono.Collections.Generic;
 using Oxide.Patcher.Patching;
 
 using MethodDefinition = Mono.Cecil.MethodDefinition;
+using AssemblyDefinition = Mono.Cecil.AssemblyDefinition;
 
 namespace Oxide.Patcher.Common
 {
@@ -30,6 +31,20 @@ namespace Oxide.Patcher.Common
         };
 
         private static readonly Dictionary<string, (PEFile PeFile, CSharpDecompiler Decompiler)> DecompilerCache = new Dictionary<string, (PEFile, CSharpDecompiler)>();
+
+        // Used by doc generation: one snapshot per throwaway AssemblyDefinition, populated lazily on first
+        // decompile. The caller MUST invoke ClearInMemorySnapshotCache() once doc-gen is done so the snapshot
+        // doesn't outlive the AssemblyDefinition it was built from.
+        private static readonly Dictionary<AssemblyDefinition, (PEFile PeFile, CSharpDecompiler Decompiler)> InMemorySnapshotCache = new Dictionary<AssemblyDefinition, (PEFile, CSharpDecompiler)>();
+
+        public static void ClearInMemorySnapshotCache()
+        {
+            foreach (var entry in InMemorySnapshotCache.Values)
+            {
+                entry.PeFile.Dispose();
+            }
+            InMemorySnapshotCache.Clear();
+        }
 
         /// <summary>
         /// Decompiles the specified method body to MSIL
@@ -53,16 +68,16 @@ namespace Oxide.Patcher.Common
             return sb.ToString();
         }
 
-        public static SyntaxTree GetSyntaxTree(MethodDefinition methodDefinition)
+        public static SyntaxTree GetSyntaxTree(MethodDefinition methodDefinition, bool useInMemorySnapshot = false)
         {
-            using (DecompilerWrapper decompiler = GetDecompiler(methodDefinition))
+            using (DecompilerWrapper decompiler = GetDecompiler(methodDefinition, useInMemorySnapshot: useInMemorySnapshot))
             {
                 MethodDefinitionHandle handle = (MethodDefinitionHandle)MetadataTokens.EntityHandle(methodDefinition.MetadataToken.ToInt32());
                 return decompiler.Decompile(handle);
             }
         }
 
-        public static async Task<string> GetSourceCode(MethodDefinition methodDefinition, ILWeaver weaver = null)
+        public static async Task<string> GetSourceCode(MethodDefinition methodDefinition, ILWeaver weaver = null, bool useInMemorySnapshot = false)
         {
             try
             {
@@ -70,7 +85,7 @@ namespace Oxide.Patcher.Common
                 {
                     EntityHandle handle = MetadataTokens.EntityHandle(methodDefinition.MetadataToken.ToInt32());
 
-                    using (DecompilerWrapper decompiler = GetDecompiler(methodDefinition, weaver))
+                    using (DecompilerWrapper decompiler = GetDecompiler(methodDefinition, weaver, useInMemorySnapshot: useInMemorySnapshot))
                     {
                         return decompiler.DecompileAsString(handle);
                     }
@@ -90,9 +105,28 @@ namespace Oxide.Patcher.Common
         }
 
         private static DecompilerWrapper GetDecompiler(MethodDefinition methodDefinition, ILWeaver weaver = null,
-                                                                 bool writeToStream = false)
+                                                                 bool writeToStream = false, bool useInMemorySnapshot = false)
         {
             string targetDirectory = PatcherForm.MainForm?.CurrentProject.TargetDirectory ?? Program.PatchProject.TargetDirectory;
+
+            if (useInMemorySnapshot && weaver == null && !writeToStream)
+            {
+                AssemblyDefinition assembly = methodDefinition.Module.Assembly;
+                if (!InMemorySnapshotCache.TryGetValue(assembly, out (PEFile PeFile, CSharpDecompiler Decompiler) snapshot))
+                {
+                    MemoryStream snapshotStream = new MemoryStream();
+                    assembly.Write(snapshotStream);
+                    snapshotStream.Position = 0;
+
+                    string snapshotPath = Path.Combine(targetDirectory, assembly.Name.Name);
+                    PEFile snapshotPeFile = new PEFile(assembly.Name.Name, snapshotStream);
+                    UniversalAssemblyResolver snapshotResolver = new UniversalAssemblyResolver(snapshotPath, true, snapshotPeFile.DetectTargetFrameworkId(), snapshotPeFile.DetectRuntimePack());
+                    snapshot = (snapshotPeFile, new CSharpDecompiler(snapshotPeFile, snapshotResolver, DecompilerSettings));
+                    InMemorySnapshotCache[assembly] = snapshot;
+                }
+
+                return new DecompilerWrapper(snapshot.Decompiler, snapshot.PeFile, null, ownsPeFile: false);
+            }
 
             if (weaver != null || writeToStream)
             {

@@ -65,7 +65,7 @@ namespace Oxide.Patcher.Docs
 
             MethodData = new DocsMethodData(methodDef);
 
-            string methodSourceCode = Decompiler.GetSourceCode(methodDef).Result;
+            string methodSourceCode = Decompiler.GetSourceCode(methodDef, useInMemorySnapshot: true).Result;
 
             string[] lines = Regex.Split(methodSourceCode, "\r\n|\r|\n");
 
@@ -277,7 +277,7 @@ namespace Oxide.Patcher.Docs
 
         private string GetLocalVariableName(int index, MethodDefinition method)
         {
-            SyntaxTree syntaxTree = Decompiler.GetSyntaxTree(method);
+            SyntaxTree syntaxTree = Decompiler.GetSyntaxTree(method, useInMemorySnapshot: true);
 
             if (!(syntaxTree?.Members.First() is MethodDeclaration methodDeclaration))
             {
